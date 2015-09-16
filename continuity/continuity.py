@@ -76,8 +76,9 @@ class Continuity(Task):
         super(Continuity, self).__init__(*args, **kwargs)
         self._environments = {}
 
-    def bootstrap(self, environment_name, working_ref, target_ref, deploy_setup,
-                  build_setup=None, test_setup=None, merge_setup=None):
+    def bootstrap(self, environment_name, working_ref, target_ref,
+                  build_setup=None, test_setup=None, merge_setup=None,
+                  deploy_setup=None):
         self._environments[environment_name] = {
             'name': environment_name,
             'working_ref': working_ref,
