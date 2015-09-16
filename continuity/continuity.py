@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-from fabric.api import task, run, cd, env, settings
+from contextlib import nested
+from fabric.api import task, run, cd, env, settings, hide
 from fabric.colors import cyan, green, red, yellow
 from fabric.tasks import Task
 from fabric.utils import abort
@@ -10,7 +11,7 @@ def check_setup(func):
             print yellow('No setup provided for this step, skipping...')
             return
 
-        func(setup, *args, **kwargs)
+        return func(setup, *args, **kwargs)
 
     return wrapper
 
@@ -28,7 +29,7 @@ def build(setup, action):
         # Fetch latest changes to the working branch.
         remote, branch = env.working_ref.split('/', 1)
         run('git fetch {remote}'.format(remote=remote))
-        changed_files = get_change_list(branch)
+        changed_files = get_change_list(env.working_ref)
 
         # Check if we have to build.
         if changed_files or action == 'force':
@@ -36,39 +37,42 @@ def build(setup, action):
             with settings(**build_env):
                 build_task(changed_files, action)
 
+        run('git merge {working_ref}'.format(working_ref=env.working_ref))
+
         return changed_files
 
 
 @task
 @check_setup
-def problem_free(setup, action):
+def problem_free(setup):
     test_env, test_task = setup
-    with settings(**test_env):
-        return test_task(action)
+    with nested(settings(**test_env), cd(env.project_path)):
+        return test_task()
 
 @task
 def merge(setup, working_ref, target_ref):
     print 'Merging {working_ref} onto {target_ref}'.format(working_ref=working_ref,
                                                            target_ref=target_ref)
 
-    remote, branch = target_ref.split('/', 1)
-    _, work_branch = working_ref.split('/', 1)
-    run('git checkout {branch}'.format(branch=branch))
-    run('git merge {working_ref}'.format(working_ref=working_ref))
-    run('git push {remote} {branch}'.format(remote=remote, branch=branch))
-    run('git checkout {branch}'.format(branch=work_branch))
+    with cd(env.project_path):
+        remote, branch = target_ref.split('/', 1)
+        _, work_branch = working_ref.split('/', 1)
+        run('git checkout {branch}'.format(branch=branch))
+        run('git merge {working_ref}'.format(working_ref=working_ref))
+        run('git push {remote} {branch}'.format(remote=remote, branch=branch))
+        run('git checkout {branch}'.format(branch=work_branch))
 
-    if setup:
-        push_env, push_task = setup
-        with settings(**push_env):
-            return push_task()
+        if setup:
+            push_env, push_task = setup
+            with settings(**push_env):
+                return push_task()
 
 
 @task
 @check_setup
 def deploy(setup):
     deploy_env, deploy_task = setup
-    with settings(**deploy_env):
+    with nested(settings(**deploy_env), cd(env.project_path)):
         return deploy_task()
 
 class Continuity(Task):
@@ -100,7 +104,7 @@ class Continuity(Task):
             print '1. Building.'
             changed_files = build(env.build_setup, action)
 
-            if not changed_files or action != 'force':
+            if not changed_files and action != 'force':
                 return
 
             print '2. Testing.'
