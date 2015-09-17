@@ -5,116 +5,75 @@ from fabric.colors import cyan, green, red, yellow
 from fabric.tasks import Task
 from fabric.utils import abort
 
-def check_setup(func):
-    def wrapper(setup, *args, **kwargs):
-        if setup is None:
-            print yellow('No setup provided for this step, skipping...')
-            return
-
-        return func(setup, *args, **kwargs)
-
-    return wrapper
-
+########## Basic tasks
 @task
 def get_change_list(branch):
+    """Get a list of changes between `origin/branch` and `branch`"""
     with hide('running', 'stdout'):
         return run(
             'git diff-index --cached --name-only {branch}'.format(branch=branch)
         ).splitlines()
 
 @task
-@check_setup
-def build(setup, action):
-    with cd(env.project_path):
-        # Fetch latest changes to the working branch.
-        remote, branch = env.working_ref.split('/', 1)
-        run('git fetch {remote}'.format(remote=remote))
-        changed_files = get_change_list(env.working_ref)
+def fetch_changes():
+    """Fetch latest changes to the working branch."""
+    remote, branch = env.working_ref.split('/', 1)
+    run('git fetch {remote}'.format(remote=remote))
 
-        # Check if we have to build.
-        if changed_files or action == 'force':
-            build_env, build_task = setup
-            with settings(**build_env):
+
+@task
+def update_copy():
+    """Update the local copy of the repository, getting a list of changes"""
+    fetch_changes()
+    changed_files = get_change_list(env.working_ref)
+    run('git merge {working_ref}'.format(working_ref=env.working_ref))
+    return changed_files
+
+
+########## Continuity decorators
+
+def build_step(build_task):
+    @task
+    def build(action):
+        """Continuity's build step"""
+        with cd(env.project_path):
+            # Fetch changes from repository and update current branch
+            changed_files = update_copy()
+
+            # Check if we have to build.
+            if changed_files or action == 'force':
                 build_task(changed_files, action)
 
-        run('git merge {working_ref}'.format(working_ref=env.working_ref))
+            return changed_files
 
-        return changed_files
+    return build
 
+def test_step(test_task):
+    @task
+    def test():
+        """Continuity's test step: checks that the codebase is problem-free"""
+        if test_task():
+            print green('Changes are problem-free.')
+        else:
+            abort(red('Changes are not problem-free. Aborting...'))
 
-@task
-@check_setup
-def problem_free(setup):
-    test_env, test_task = setup
-    with nested(settings(**test_env), cd(env.project_path)):
-        return test_task()
+    return test
 
-@task
-def merge(setup, working_ref, target_ref):
-    print 'Merging {working_ref} onto {target_ref}'.format(working_ref=working_ref,
-                                                           target_ref=target_ref)
+def merge_step(push_task):
+    @task
+    def merge():
+        """Continuity's merge and push step"""
+        print 'Merging {working_ref} onto {target_ref}'.format(**env)
+        with cd(env.project_path):
+            remote, branch = target_ref.split('/', 1)
+            _, work_branch = working_ref.split('/', 1)
+            run('git checkout {branch}'.format(branch=branch))
+            run('git merge {working_ref}'.format(working_ref=working_ref))
+            run('git push {remote} {branch}'.format(remote=remote, branch=branch))
+            run('git checkout {branch}'.format(branch=work_branch))
 
-    with cd(env.project_path):
-        remote, branch = target_ref.split('/', 1)
-        _, work_branch = working_ref.split('/', 1)
-        run('git checkout {branch}'.format(branch=branch))
-        run('git merge {working_ref}'.format(working_ref=working_ref))
-        run('git push {remote} {branch}'.format(remote=remote, branch=branch))
-        run('git checkout {branch}'.format(branch=work_branch))
+        push_task()
 
-        if setup:
-            push_env, push_task = setup
-            with settings(**push_env):
-                return push_task()
+    return merge
 
-
-@task
-@check_setup
-def deploy(setup):
-    deploy_env, deploy_task = setup
-    with nested(settings(**deploy_env), cd(env.project_path)):
-        return deploy_task()
-
-class Continuity(Task):
-    def __init__(self, *args, **kwargs):
-        super(Continuity, self).__init__(*args, **kwargs)
-        self._environments = {}
-
-    def bootstrap(self, environment_name, working_ref, target_ref,
-                  build_setup=None, test_setup=None, merge_setup=None,
-                  deploy_setup=None):
-        self._environments[environment_name] = {
-            'name': environment_name,
-            'working_ref': working_ref,
-            'target_ref': target_ref,
-            'deploy_setup': deploy_setup,
-            'build_setup': build_setup,
-            'test_setup': test_setup,
-            'merge_setup': merge_setup
-        }
-
-    def run(self, environment, action='check'):
-        if environment not in self._environments:
-            abort(red('Unknown environment: {}'.format(environment)))
-
-        environment = self._environments[environment]
-        print green('Starting Continuity\'s integration and deploy process')
-
-        with settings(**environment):
-            print '1. Building.'
-            changed_files = build(env.build_setup, action)
-
-            if not changed_files and action != 'force':
-                return
-
-            print '2. Testing.'
-            if not problem_free(env.test_setup):
-                abort(red('Failed detecting that the new changes are problem free'))
-
-            print '3. Merging & Pushing.'
-            merge(env.merge_setup, env.working_ref, env.target_ref)
-
-            print '4. Deploying.'
-            deploy(env.deploy_setup)
-
-        print green('Continuity process finished!')
+deploy_step = task
